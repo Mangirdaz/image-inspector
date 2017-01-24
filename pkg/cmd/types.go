@@ -2,8 +2,9 @@ package cmd
 
 import (
 	"fmt"
-	oscapscanner "github.com/openshift/image-inspector/pkg/openscap"
 	"os"
+
+	oscapscanner "github.com/mangirdaz/image-inspector/pkg/openscap"
 )
 
 var (

@@ -1,21 +1,12 @@
 FROM openshift/origin-base
 MAINTAINER Federico Simoncelli <fsimonce@redhat.com>
 
-RUN yum install -y golang openscap-scanner && yum clean all
+RUN yum install -y golang openscap-scanner openscap-containers openscap-utils && yum clean all
 
-ENV PKGPATH=/go/src/github.com/openshift/image-inspector
-
-WORKDIR $PKGPATH
-
-ADD .   $PKGPATH
-ENV GOBIN  /usr/bin
-ENV GOPATH /go:$PKGPATH/Godeps/_workspace
-
-RUN go install $PKGPATH/cmd/image-inspector.go && \
-    mkdir -p /var/lib/image-inspector
+ADD ./cmd/cmd /usr/local/bin/cmd
 
 EXPOSE 8080
 
-WORKDIR /var/lib/image-inspector
+WORKDIR /usr/local/bin/
 
-ENTRYPOINT ["/usr/bin/image-inspector"]
+ENTRYPOINT ["/usr/local/bin/cmd"]

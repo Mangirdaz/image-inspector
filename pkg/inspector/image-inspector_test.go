@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	docker "github.com/fsouza/go-dockerclient"
-	iicmd "github.com/openshift/image-inspector/pkg/cmd"
-	"github.com/openshift/image-inspector/pkg/openscap"
+	iicmd "github.com/mangirdaz/image-inspector/pkg/cmd"
+	"github.com/mangirdaz/image-inspector/pkg/openscap"
 )
 
 type FailMockScanner struct{}

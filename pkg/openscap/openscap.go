@@ -11,8 +11,10 @@ import (
 	"strings"
 	"syscall"
 
+	"log"
+
 	docker "github.com/fsouza/go-dockerclient"
-	util "github.com/openshift/image-inspector/pkg/util"
+	util "github.com/mangirdaz/image-inspector/pkg/util"
 )
 
 const (
@@ -93,6 +95,7 @@ func (s *defaultOSCAPScanner) getRHELDist() (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		log.Printf(string(output))
 		if strings.Contains(string(output), fmt.Sprintf("%s%d: true", CPE, dist)) {
 			return dist, nil
 		}

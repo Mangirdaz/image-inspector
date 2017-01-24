@@ -8,21 +8,21 @@ import (
 	"log"
 	"math"
 	"math/big"
-	"net/http"
 	"os"
 	"path"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
 	"archive/tar"
 	"crypto/rand"
 
+	"github.com/docker/libkv/store"
 	docker "github.com/fsouza/go-dockerclient"
-	"github.com/openshift/image-inspector/pkg/openscap"
-	"golang.org/x/net/webdav"
+	"github.com/mangirdaz/image-inspector/pkg/openscap"
+	"github.com/mangirdaz/image-inspector/pkg/storage"
 
-	iicmd "github.com/openshift/image-inspector/pkg/cmd"
+	iicmd "github.com/mangirdaz/image-inspector/pkg/cmd"
 )
 
 type APIVersions struct {
@@ -57,12 +57,27 @@ type ImageInspector interface {
 type defaultImageInspector struct {
 	opts iicmd.ImageInspectorOptions
 	meta InspectorMetadata
+	kv   storage.LibKVBackend
+}
+
+// LibKVBackend - libkv container
+type LibKVBackend struct {
+	Options *store.Config
+	Backend string
+	Addrs   []string
+	Store   store.Store
+	Locks   map[string]store.Locker
+
+	MutexLocks map[string]*sync.Mutex
+
+	TTLLocks map[string]chan struct{}
 }
 
 // NewDefaultImageInspector provides a new default inspector.
-func NewDefaultImageInspector(opts iicmd.ImageInspectorOptions) ImageInspector {
+func NewDefaultImageInspector(opts iicmd.ImageInspectorOptions, kv *storage.LibKVBackend) ImageInspector {
 	return &defaultImageInspector{opts,
-		*NewInspectorMetadata(&docker.Image{})}
+		*NewInspectorMetadata(&docker.Image{}),
+		*kv}
 }
 
 // Inspect inspects and serves the image based on the ImageInspectorOptions.
@@ -87,11 +102,11 @@ func (i *defaultImageInspector) Inspect() error {
 	}
 	i.meta.Image = *imageMetadata
 
-	supportedVersions := APIVersions{Versions: []string{VERSION_TAG}}
-
 	var scanReport []byte
 	var htmlScanReport []byte
+	log.Printf("Scan image %s with scanner %s", i.opts.Image, i.opts.ScanType)
 	if i.opts.ScanType == "openscap" {
+
 		if i.opts.ScanResultsDir, err = createOutputDir(i.opts.ScanResultsDir, "image-inspector-scan-results-"); err != nil {
 			return err
 		}
@@ -105,77 +120,9 @@ func (i *defaultImageInspector) Inspect() error {
 		}
 	}
 
-	if len(i.opts.Serve) > 0 {
-		servePath := i.opts.DstPath
-		if i.opts.Chroot {
-			if err := syscall.Chroot(i.opts.DstPath); err != nil {
-				return fmt.Errorf("Unable to chroot into %s: %v\n", i.opts.DstPath, err)
-			}
-			servePath = CHROOT_SERVE_PATH
-		} else {
-			log.Printf("!!!WARNING!!! It is insecure to serve the image content without changing")
-			log.Printf("root (--chroot). Absolute-path symlinks in the image can lead to disclose")
-			log.Printf("information of the hosting system.")
-		}
+	i.kv.Store.Put(i.opts.Image, scanReport, nil)
+	i.kv.Store.Put("html/"+i.opts.Image, htmlScanReport, nil)
 
-		log.Printf("Serving image content %s on webdav://%s%s", i.opts.DstPath, i.opts.Serve, CONTENT_URL_PREFIX)
-
-		http.HandleFunc(HEALTHZ_URL_PATH, func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("ok\n"))
-		})
-
-		http.HandleFunc(API_URL_PREFIX, func(w http.ResponseWriter, r *http.Request) {
-			body, err := json.MarshalIndent(supportedVersions, "", "  ")
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Write(body)
-		})
-
-		http.HandleFunc(METADATA_URL_PATH, func(w http.ResponseWriter, r *http.Request) {
-			body, err := json.MarshalIndent(i.meta, "", "  ")
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Write(body)
-		})
-
-		http.HandleFunc(OPENSCAP_URL_PATH, func(w http.ResponseWriter, r *http.Request) {
-			if i.opts.ScanType == "openscap" && i.meta.OpenSCAP.Status == StatusSuccess {
-				w.Write(scanReport)
-			} else {
-				if i.meta.OpenSCAP.Status == StatusError {
-					http.Error(w, fmt.Sprintf("OpenSCAP Error: %s", i.meta.OpenSCAP.ErrorMessage),
-						http.StatusInternalServerError)
-				} else {
-					http.Error(w, "OpenSCAP option was not chosen", http.StatusNotFound)
-				}
-			}
-		})
-
-		http.HandleFunc(OPENSCAP_REPORT_URL_PATH, func(w http.ResponseWriter, r *http.Request) {
-			if i.opts.ScanType == "openscap" && i.meta.OpenSCAP.Status == StatusSuccess && i.opts.OpenScapHTML {
-				w.Write(htmlScanReport)
-			} else {
-				if i.meta.OpenSCAP.Status == StatusError {
-					http.Error(w, fmt.Sprintf("OpenSCAP Error: %s", i.meta.OpenSCAP.ErrorMessage),
-						http.StatusInternalServerError)
-				} else {
-					http.Error(w, "OpenSCAP option was not chosen", http.StatusNotFound)
-				}
-			}
-		})
-
-		http.Handle(CONTENT_URL_PREFIX, &webdav.Handler{
-			Prefix:     CONTENT_URL_PREFIX,
-			FileSystem: webdav.Dir(servePath),
-			LockSystem: webdav.NewMemLS(),
-		})
-
-		return http.ListenAndServe(i.opts.Serve, nil)
-	}
 	return nil
 }
 
@@ -292,11 +239,11 @@ func (i *defaultImageInspector) createAndExtractImage(client *docker.Client, con
 	}
 
 	// delete the container when we are done extracting it
-	defer func() {
-		client.RemoveContainer(docker.RemoveContainerOptions{
-			ID: container.ID,
-		})
-	}()
+	//defer func() {
+	//	client.RemoveContainer(docker.RemoveContainerOptions{
+	//		ID: container.ID,
+	//	})
+	//}()
 
 	containerMetadata, err := client.InspectContainer(container.ID)
 	if err != nil {
@@ -322,14 +269,15 @@ func (i *defaultImageInspector) createAndExtractImage(client *docker.Client, con
 	// start the copy function first which will block after the first write while waiting for
 	// the reader to read.
 	errorChannel := make(chan error)
+
 	go func() {
-		errorChannel <- client.CopyFromContainer(docker.CopyFromContainerOptions{
-			Container:    container.ID,
+		errorChannel <- client.DownloadFromContainer(container.ID, docker.DownloadFromContainerOptions{
 			OutputStream: writer,
-			Resource:     "/",
+			Context:      nil,
+			Path:         "/",
 		})
 	}()
-
+	log.Print("Done")
 	// block on handling the reads here so we ensure both the write and the reader are finished
 	// (read waits until an EOF or error occurs).
 	handleTarStream(reader, i.opts.DstPath)
@@ -496,7 +444,7 @@ func createOutputDir(dirName string, tempName string) (string, error) {
 	} else {
 		// forcing to use /var/tmp because often it's not an in-memory tmpfs
 		var err error
-		dirName, err = ioutilTempDir("/var/tmp", tempName)
+		dirName, err = ioutilTempDir("/tmp", tempName)
 		if err != nil {
 			return "", fmt.Errorf("Unable to create temporary path: %v\n", err)
 		}
